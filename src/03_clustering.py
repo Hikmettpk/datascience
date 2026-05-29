@@ -56,7 +56,7 @@ def load_data() -> tuple[pd.DataFrame, np.ndarray, list]:
     # Use numeric features + selected engineered features for clustering
     cluster_features = [c for c in NUMERIC_COLS if c in df.columns] + [
         "age_num", "n_active_meds", "total_visits",
-        "max_glu_serum", "A1Cresult", "change", "diabetesMed",
+        "change", "diabetesMed",
         "procedures_per_day", "meds_per_day",
     ]
     cluster_features = [c for c in cluster_features if c in df.columns]

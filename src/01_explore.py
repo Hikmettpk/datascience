@@ -71,11 +71,14 @@ def basic_info(df: pd.DataFrame) -> pd.DataFrame:
             top = df_nan[col].value_counts(dropna=True).head(4).to_dict()
             top_str = str(top)[:80]
         else:
-            desc = df_nan[col].describe()
-            top_str = (
-                f"min={desc['min']:.1f}  mean={desc['mean']:.1f}"
-                f"  max={desc['max']:.1f}  std={desc['std']:.1f}"
-            )
+            try:
+                s = df_nan[col]
+                top_str = (
+                    f"min={s.min():.1f}  mean={s.mean():.1f}"
+                    f"  max={s.max():.1f}  std={s.std():.1f}"
+                )
+            except Exception:
+                top_str = str(df_nan[col].value_counts(dropna=True).head(3).to_dict())[:80]
 
         log.info(
             f"  {col:<45} {dtype:<10} {n_miss:>8,} {pct_miss:>6.1f}%  {n_unique:>7,}  {top_str}"

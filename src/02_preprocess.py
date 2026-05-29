@@ -114,8 +114,13 @@ def keep_first_encounter(df: pd.DataFrame) -> pd.DataFrame:
 def drop_columns(df: pd.DataFrame) -> pd.DataFrame:
     log.info(f"\n[STEP 5] Drop low-value / high-missing columns")
 
-    # weight: ~97% missing; payer_code: ~40% missing; identifiers
-    drop_cols = ["weight", "payer_code", "encounter_id", "patient_nbr"]
+    # weight: ~97% missing; payer_code: ~40% missing
+    # medical_specialty: ~49% missing; max_glu_serum: ~95%; A1Cresult: ~83%
+    # identifiers: encounter_id, patient_nbr
+    drop_cols = [
+        "weight", "payer_code", "encounter_id", "patient_nbr",
+        "medical_specialty", "max_glu_serum", "A1Cresult",
+    ]
 
     # Drop near-constant medication columns (>98% 'No')
     near_const = []
@@ -199,13 +204,7 @@ def encode_medications(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def encode_glu_a1c(df: pd.DataFrame) -> pd.DataFrame:
-    log.info(f"\n[STEP 11] Encode max_glu_serum and A1Cresult")
-    glu_map = {"None": 0, "Norm": 1, ">200": 2, ">300": 3}
-    a1c_map = {"None": 0, "Norm": 1, ">7": 2, ">8": 3}
-    df["max_glu_serum"] = df["max_glu_serum"].fillna("None").map(glu_map).fillna(0).astype(int)
-    df["A1Cresult"] = df["A1Cresult"].fillna("None").map(a1c_map).fillna(0).astype(int)
-    log.info(f"  max_glu_serum ordinal: {glu_map}")
-    log.info(f"  A1Cresult ordinal    : {a1c_map}")
+    log.info(f"\n[STEP 11] max_glu_serum & A1Cresult — already dropped (>83% missing), skipping")
     return df
 
 
@@ -221,12 +220,10 @@ def encode_binary_flags(df: pd.DataFrame) -> pd.DataFrame:
 def one_hot_categoricals(df: pd.DataFrame) -> pd.DataFrame:
     log.info(f"\n[STEP 13] One-hot encode remaining categorical columns")
 
-    # Fill missing before encoding
     df["race"] = df["race"].fillna("Unknown")
-    df["medical_specialty"] = df["medical_specialty"].fillna("Unknown")
 
     cat_cols = [
-        "race", "medical_specialty",
+        "race",
         "admission_type", "discharge_disposition", "admission_source",
         "diag_1_cat", "diag_2_cat", "diag_3_cat",
     ]
@@ -305,10 +302,7 @@ def make_apriori_dataset(df: pd.DataFrame) -> None:
         med = df[col].median()
         bin_df[col + "_high"] = (df[col] > med).astype(int)
 
-    # Ordinal columns
-    for col in ["max_glu_serum", "A1Cresult"]:
-        if col in df.columns:
-            bin_df[col + "_elevated"] = (df[col] >= 2).astype(int)
+    # max_glu_serum / A1Cresult dropped upstream — nothing to binarise here
 
     out_path = os.path.join(PROCESSED_DIR, "diabetic_preprocessed_for_rules.csv")
     bin_df.to_csv(out_path, index=False)
