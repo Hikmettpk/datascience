@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Data files (never upload raw data)
+data/*.csv
+data/*.xlsx
+data/*.zip
+data/*.json
+data/*.parquet
+data/*.pkl
+!data/.gitkeep
+
+# Processed data (can be regenerated)
+data_processed/*.csv
+data_processed/*.xlsx
+data_processed/*.pkl
+data_processed/*.parquet
+!data_processed/.gitkeep
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs (keep gitkeep, ignore actual logs)
+logs/*.log
+!logs/.gitkeep
+
+# Outputs - figures and results can be committed selectively
+# outputs/figures/
+# outputs/results/
+
+# Misc
+*.bak
+*.tmp
