@@ -11,7 +11,7 @@ Experiments (10 total):
   6.  Random Forest — n=100, default
   7.  Random Forest — n=200, tuned (max_features, min_samples)
   8.  Gradient Boosting (XGBoost) — n=100
-  9.  SVM         — RBF kernel, top-20 features
+  9.  SVM         — Linear kernel (LinearSVC), top-20 features
   10. MLP         — 2 hidden layers, top-30 features
 
 All experiments use:
@@ -31,7 +31,6 @@ Usage:
 import os
 import sys
 import warnings
-import json
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -40,23 +39,20 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
 
-from sklearn.model_selection import StratifiedKFold, cross_val_score, cross_validate
+from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
-from sklearn.feature_selection import (
-    SelectKBest, f_classif, mutual_info_classif,
-    VarianceThreshold, RFECV,
-)
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif, VarianceThreshold
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.naive_bayes import GaussianNB
-from sklearn.tree import DecisionTreeClassifier, export_text
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.svm import SVC
+from sklearn.svm import LinearSVC
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import (
     classification_report, confusion_matrix,
-    roc_auc_score, roc_curve, f1_score, precision_score, recall_score,
-    accuracy_score, average_precision_score,
+    roc_auc_score, roc_curve,
 )
 from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -211,7 +207,7 @@ def evaluate_model(
 
     scoring = ["accuracy", "f1", "precision", "recall", "roc_auc"]
     scores = cross_validate(pipeline, X_use, y, cv=cv, scoring=scoring,
-                            return_train_score=False, n_jobs=-1)
+                            return_train_score=False, n_jobs=1)
 
     result = {
         "experiment": name,
@@ -342,12 +338,15 @@ def run_experiments(X: np.ndarray, y: np.ndarray,
     )
     results.append(r)
 
-    # ── Exp 9: SVM top-20 ─────────────────────────────────────────────────────
+    # ── Exp 9: Linear SVM top-20 ──────────────────────────────────────────────
+    # LinearSVC scales to large datasets (O(n) vs O(n²) for RBF SVC).
+    # Wrapped in CalibratedClassifierCV to get predict_proba for ROC-AUC.
+    linear_svm = CalibratedClassifierCV(
+        LinearSVC(C=1.0, max_iter=2000, random_state=RANDOM_STATE), cv=3
+    )
     r = evaluate_model(
-        "EXP09_SVM_RBF_top20",
-        make_pipeline(scaler, ("clf", SVC(
-            kernel="rbf", C=1.0, gamma="scale",
-            probability=True, random_state=RANDOM_STATE))),
+        "EXP09_LinearSVM_top20",
+        make_pipeline(scaler, ("clf", linear_svm)),
         X, y, feature_names, feature_subset=top20,
     )
     results.append(r)
@@ -382,8 +381,6 @@ def best_model_deep_dive(
     log.info(res_df.head(5).to_string(index=False))
 
     # Re-train best model with full training split for confusion matrix and ROC
-    from sklearn.model_selection import train_test_split
-
     top30 = feat_sets.get("rf_importance_top30", feature_names)[:30]
     top20 = feat_sets.get("anova_top30", feature_names)[:20]
 
@@ -441,8 +438,6 @@ def best_model_deep_dive(
 
 
 def plot_roc_comparison(X, y, feature_names, feat_sets) -> None:
-    from sklearn.model_selection import train_test_split
-
     top30 = feat_sets.get("rf_importance_top30", feature_names)[:30]
     top20 = feat_sets.get("anova_top30", feature_names)[:20]
 
@@ -454,24 +449,30 @@ def plot_roc_comparison(X, y, feature_names, feat_sets) -> None:
     smote = SMOTE(random_state=RANDOM_STATE)
     scaler = StandardScaler()
 
+    # (use_smote, clf, X_train_slice, X_test_slice)
+    xgb_clf = (
+        XGBClassifier(n_estimators=100, random_state=RANDOM_STATE, verbosity=0,
+                      scale_pos_weight=(y_tr == 0).sum() / (y_tr == 1).sum())
+        if HAS_XGB
+        else GradientBoostingClassifier(n_estimators=100, random_state=RANDOM_STATE)
+    )
     models_for_roc = [
-        ("Random Forest", RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE), X_tr, X_te),
-        ("Decision Tree", DecisionTreeClassifier(max_depth=10, random_state=RANDOM_STATE), X_tr, X_te),
-        ("XGBoost" if HAS_XGB else "GradientBoosting",
-         XGBClassifier(n_estimators=100, random_state=RANDOM_STATE, verbosity=0)
-         if HAS_XGB else GradientBoostingClassifier(n_estimators=100, random_state=RANDOM_STATE),
-         X_tr, X_te),
-        ("KNN", KNeighborsClassifier(n_neighbors=11), X_tr[:, idx20], X_te[:, idx20]),
-        ("MLP", MLPClassifier(hidden_layer_sizes=(64, 32), max_iter=100,
-                              random_state=RANDOM_STATE, early_stopping=True),
-         X_tr[:, idx30], X_te[:, idx30]),
+        ("Random Forest",   True,  RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE), X_tr,          X_te),
+        ("Decision Tree",   True,  DecisionTreeClassifier(max_depth=10,     random_state=RANDOM_STATE), X_tr,          X_te),
+        ("XGBoost" if HAS_XGB else "GradBoost", False, xgb_clf,                                        X_tr,          X_te),
+        ("KNN",             True,  KNeighborsClassifier(n_neighbors=11),                                X_tr[:,idx20], X_te[:,idx20]),
+        ("MLP",             True,  MLPClassifier(hidden_layer_sizes=(64,32), max_iter=100,
+                                                 random_state=RANDOM_STATE, early_stopping=True),       X_tr[:,idx30], X_te[:,idx30]),
     ]
 
     fig, ax = plt.subplots(figsize=(9, 7))
     colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2"]
 
-    for (name, clf, Xtr, Xte), color in zip(models_for_roc, colors):
-        Xtr_s, ytr_s = smote.fit_resample(Xtr, y_tr)
+    for (name, use_smote, clf, Xtr, Xte), color in zip(models_for_roc, colors):
+        if use_smote:
+            Xtr_s, ytr_s = smote.fit_resample(Xtr, y_tr)
+        else:
+            Xtr_s, ytr_s = Xtr, y_tr
         Xtr_s = scaler.fit_transform(Xtr_s)
         Xte_s = scaler.transform(Xte)
         clf.fit(Xtr_s, ytr_s)
@@ -505,10 +506,7 @@ def statistical_significance(results: list, X: np.ndarray, y: np.ndarray,
     log.info(f"  Best  : {best['experiment']}  AUC={best['roc_auc']:.4f}")
     log.info(f"  Second: {second['experiment']}  AUC={second['roc_auc']:.4f}")
 
-    # Re-run CV with per-fold scores
-    top30 = list(feature_names)[:30]
-    idx = list(range(min(30, X.shape[1])))
-
+    # Re-run per-fold CV with SMOTE (consistent with experiment setup)
     cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
 
     def get_fold_scores(pipeline, X_use, y_use):
@@ -519,16 +517,29 @@ def statistical_significance(results: list, X: np.ndarray, y: np.ndarray,
             fold_scores.append(roc_auc_score(y_use[te], prob))
         return np.array(fold_scores)
 
-    scaler = StandardScaler()
+    # Top-30 feature subset (same as EXP07)
+    idx30 = list(range(min(30, X.shape[1])))
+    X_top30 = X[:, idx30]
 
+    # Best: RF n=200 tuned on top-30 features (EXP07)
     best_scores = get_fold_scores(
-        Pipeline([("s", scaler), ("c", RandomForestClassifier(
-            n_estimators=200, random_state=RANDOM_STATE, n_jobs=-1))]),
-        X[:, :30], y
+        ImbPipeline([
+            ("smote", SMOTE(random_state=RANDOM_STATE)),
+            ("s", StandardScaler()),
+            ("c", RandomForestClassifier(n_estimators=200, max_features="sqrt",
+                                         max_depth=20, min_samples_leaf=5,
+                                         random_state=RANDOM_STATE, n_jobs=-1)),
+        ]),
+        X_top30, y
     )
+    # Second: RF n=100 default on all features (EXP06)
     second_scores = get_fold_scores(
-        Pipeline([("s", scaler), ("c", RandomForestClassifier(
-            n_estimators=100, random_state=RANDOM_STATE, n_jobs=-1))]),
+        ImbPipeline([
+            ("smote", SMOTE(random_state=RANDOM_STATE)),
+            ("s", StandardScaler()),
+            ("c", RandomForestClassifier(n_estimators=100,
+                                         random_state=RANDOM_STATE, n_jobs=-1)),
+        ]),
         X, y
     )
 
