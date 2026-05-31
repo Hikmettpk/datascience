@@ -256,16 +256,9 @@ def sensitivity_analysis(df: pd.DataFrame) -> None:
 def main():
     df = load_data()
 
-    # Sample for speed if very large
-    if len(df) > 30000:
-        df_sample = df.sample(n=30000, random_state=42)
-        log.info(f"\n  Sampling 30,000 rows for Apriori performance.")
-    else:
-        df_sample = df
+    sensitivity_analysis(df)
 
-    sensitivity_analysis(df_sample)
-
-    freq_items = run_apriori(df_sample, min_support=0.05)
+    freq_items = run_apriori(df, min_support=0.05)
     rules = generate_rules(freq_items, min_confidence=0.5, min_lift=1.0)
 
     analyze_readmission_rules(rules)
