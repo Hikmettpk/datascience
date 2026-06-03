@@ -1,0 +1,5 @@
+hier_label,time_in_hospital,num_lab_procedures,num_procedures,num_medications,number_outpatient,number_emergency,number_inpatient,number_diagnoses,age_num,n_active_meds,early_readmit
+0,4.469,43.64,1.32,16.553,0.07,0.065,0.058,7.173,5.995,1.501,0.088
+1,4.07,41.849,1.365,12.756,0.068,0.069,0.143,7.144,6.099,0.0,0.077
+2,4.568,44.679,1.121,16.664,1.73,0.378,0.853,7.762,6.239,1.423,0.128
+3,1.248,30.208,4.482,14.154,0.111,0.034,0.069,6.746,5.902,1.163,0.061

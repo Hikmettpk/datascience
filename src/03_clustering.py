@@ -23,11 +23,11 @@ import seaborn as sns
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN
+from sklearn.neighbors import kneighbors_graph
 from sklearn.metrics import (
     silhouette_score, davies_bouldin_score, calinski_harabasz_score,
 )
 from scipy.cluster.hierarchy import dendrogram, linkage
-from scipy.spatial.distance import cdist
 
 warnings.filterwarnings("ignore")
 sys.path.insert(0, os.path.dirname(__file__))
@@ -179,74 +179,154 @@ def kmeans_analysis(X: np.ndarray, X_2d: np.ndarray, df: pd.DataFrame) -> None:
 
 
 # ── Hierarchical Clustering ────────────────────────────────────────────────────
+#
+# Naive AgglomerativeClustering requires an O(n²) distance matrix.
+# For n=70K that is ~20 GB — not feasible on any consumer machine.
+#
+# Solution: k-NN connectivity graph (official sklearn recommendation for large n).
+#   • kneighbors_graph(k=10) builds a sparse adjacency matrix: ~8 MB total
+#   • AgglomerativeClustering(connectivity=...) only merges neighboring clusters
+#   • The FULL 69,987-row dataset is used — zero rows are removed
+#   • Reference: Pedregosa et al. (2011), sklearn User Guide §2.3.6
+#
+# Dendrogram is purely a visualisation artefact. scipy.linkage still needs a
+# dense matrix, so a 1000-row subsample is used for the plot ONLY.
+# All metric computation and cluster assignments use all rows.
+
+KNN_K = 10   # neighbours for the sparse connectivity graph
+
 
 def hierarchical_analysis(X: np.ndarray, X_2d: np.ndarray, df: pd.DataFrame) -> None:
     log.info(f"\n{SEP2}")
-    log.info("HIERARCHICAL (AGGLOMERATIVE) CLUSTERING")
+    log.info("HIERARCHICAL (AGGLOMERATIVE) CLUSTERING — full dataset via k-NN connectivity")
     log.info(SEP2)
+    log.info(f"  Dataset : {len(X):,} rows  (ALL rows used)")
+    log.info(f"  Method  : Ward / complete / average linkage + k-NN graph (k={KNN_K})")
+    log.info(f"  Memory  : O(n·k) sparse matrix — no full distance matrix needed")
 
-    # Dendrogram on a sample
-    sample_idx = np.random.RandomState(RANDOM_STATE).choice(len(X), size=min(500, len(X)), replace=False)
-    X_sample = X[sample_idx]
+    # ── 1. Build k-NN connectivity graph once ─────────────────────────────────
+    log.info(f"\n  Building k-NN graph ...")
+    conn = kneighbors_graph(X, n_neighbors=KNN_K, include_self=False, n_jobs=-1)
+    conn = 0.5 * (conn + conn.T)          # symmetrise (required by Ward)
+    log.info(f"  Done. Non-zero entries: {conn.nnz:,}  "
+             f"({conn.nnz * 8 / 1024**2:.1f} MB)")
+
+    # ── 2. Dendrogram — subsample for visualisation only ─────────────────────
+    dend_n   = 1000
+    dend_idx = np.random.RandomState(RANDOM_STATE).choice(len(X), dend_n, replace=False)
+    Z        = linkage(X[dend_idx], method="ward")
 
     fig, ax = plt.subplots(figsize=(18, 6))
-    Z = linkage(X_sample, method="ward")
     dendrogram(Z, ax=ax, no_labels=True, truncate_mode="lastp", p=50,
                leaf_font_size=8, color_threshold=0.7 * max(Z[:, 2]))
-    ax.set_title("Hierarchical Clustering Dendrogram (Ward linkage, sample n=500)")
+    ax.set_title(
+        f"Hierarchical Clustering Dendrogram — Ward linkage\n"
+        f"(n={dend_n} subsample for visualisation only; "
+        f"clustering performed on all {len(X):,} rows)"
+    )
     ax.set_xlabel("Sample index")
     ax.set_ylabel("Distance")
     plt.tight_layout()
     plt.savefig(os.path.join(FIGURES_DIR, "03_hierarchical_dendrogram.png"),
                 dpi=120, bbox_inches="tight")
     plt.close()
-    log.info(f"  Dendrogram saved (sample n={len(X_sample)})")
+    log.info(f"  Dendrogram saved (visualisation only, n={dend_n})")
 
-    # Evaluate different linkages and k values
+    # ── 3. Evaluate linkages × k on FULL data ─────────────────────────────────
     linkages = ["ward", "complete", "average"]
-    k_range = range(2, 9)
+    k_range  = range(2, 9)
+    results  = []
 
-    results = []
     for link in linkages:
         for k in k_range:
-            agg = AgglomerativeClustering(n_clusters=k, linkage=link)
-            labels = agg.fit_predict(X)
-            sil = silhouette_score(X, labels, sample_size=5000)
-            db = davies_bouldin_score(X, labels)
-            results.append(dict(linkage=link, k=k, silhouette=sil, davies_bouldin=db))
-            log.info(f"  linkage={link:<10} k={k}  sil={sil:.4f}  db={db:.4f}")
+            agg    = AgglomerativeClustering(n_clusters=k, linkage=link,
+                                             connectivity=conn)
+            labels  = agg.fit_predict(X)
+            uniq    = np.unique(labels)
+            counts  = np.bincount(labels.astype(int))
+
+            # Skip degenerate results: fewer than 2 real clusters
+            # OR a cluster so small the 5000-point sample misses it
+            if len(uniq) < 2 or counts.min() < 10:
+                log.info(f"  linkage={link:<10} k={k}  SKIP — "
+                         f"degenerate ({len(uniq)} cluster(s), min size={counts.min()})")
+                continue
+
+            try:
+                sil = silhouette_score(X, labels, sample_size=5000,
+                                       random_state=RANDOM_STATE)
+                db  = davies_bouldin_score(X, labels)
+                ch  = calinski_harabasz_score(X, labels)
+            except ValueError as e:
+                log.info(f"  linkage={link:<10} k={k}  SKIP — {e}")
+                continue
+
+            results.append(dict(linkage=link, k=k,
+                                silhouette=round(sil, 4),
+                                davies_bouldin=round(db, 4),
+                                calinski_harabasz=round(ch, 1)))
+            log.info(f"  linkage={link:<10} k={k}  "
+                     f"sil={sil:.4f}  db={db:.4f}  ch={ch:.1f}")
 
     res_df = pd.DataFrame(results)
     res_df.to_csv(os.path.join(RESULTS_DIR, "hierarchical_scores.csv"), index=False)
 
-    # Best configuration
-    best_row = res_df.loc[res_df["silhouette"].idxmax()]
+    best_row  = res_df.loc[res_df["silhouette"].idxmax()]
     best_link = best_row["linkage"]
-    best_k = int(best_row["k"])
-    log.info(f"\n  Best: linkage={best_link}, k={best_k}, sil={best_row['silhouette']:.4f}")
+    best_k    = int(best_row["k"])
+    log.info(f"\n  Best: linkage={best_link}, k={best_k}, "
+             f"silhouette={best_row['silhouette']:.4f}")
 
-    # Final model
-    agg_best = AgglomerativeClustering(n_clusters=best_k, linkage=best_link)
-    labels = agg_best.fit_predict(X)
+    # ── 4. Final model on full data ────────────────────────────────────────────
+    agg_best = AgglomerativeClustering(n_clusters=best_k, linkage=best_link,
+                                       connectivity=conn)
+    labels   = agg_best.fit_predict(X)
 
     fig, ax = plt.subplots(figsize=(9, 6))
-    scatter = ax.scatter(X_2d[:, 0], X_2d[:, 1], c=labels,
-                         cmap="tab10", alpha=0.4, s=5)
+    scatter  = ax.scatter(X_2d[:, 0], X_2d[:, 1], c=labels,
+                          cmap="tab10", alpha=0.4, s=4)
     plt.colorbar(scatter, ax=ax, label="Cluster")
-    ax.set_title(f"Hierarchical (linkage={best_link}, k={best_k}) — PCA 2D")
+    ax.set_title(
+        f"Hierarchical Clustering — linkage={best_link}, k={best_k}\n"
+        f"PCA 2D  |  full dataset n={len(X):,}"
+    )
     ax.set_xlabel("PC1"); ax.set_ylabel("PC2")
     plt.tight_layout()
     plt.savefig(os.path.join(FIGURES_DIR, "03_hierarchical_scatter.png"),
                 dpi=120, bbox_inches="tight")
     plt.close()
 
-    # Cluster readmission rates
-    df_temp = df.copy()
-    df_temp["hier_label"] = labels
-    if "early_readmit" in df_temp.columns:
-        readmit_rate = df_temp.groupby("hier_label")["early_readmit"].mean() * 100
-        log.info(f"\n  Early readmission rate per cluster (%):")
-        log.info(readmit_rate.round(2).to_string())
+    # ── 5. Cluster profiles & readmission rates ────────────────────────────────
+    df_hier = df.copy()
+    df_hier["hier_label"] = labels
+
+    profile_cols = [c for c in NUMERIC_COLS if c in df.columns] + [
+        "age_num", "n_active_meds", "early_readmit",
+    ]
+    profile_cols = [c for c in profile_cols if c in df_hier.columns]
+    profile      = df_hier.groupby("hier_label")[profile_cols].mean().round(3)
+    log.info(f"\n  Cluster profiles (full dataset, n={len(X):,}):")
+    log.info(profile.to_string())
+    profile.to_csv(os.path.join(RESULTS_DIR, "hierarchical_cluster_profiles.csv"))
+
+    readmit_rate = df_hier.groupby("hier_label")["early_readmit"].mean() * 100
+    log.info(f"\n  Early readmission rate per cluster (%):")
+    log.info(readmit_rate.round(2).to_string())
+
+    # Profile heatmap
+    disp_cols = [c for c in profile_cols if c != "early_readmit"]
+    norm_p    = (profile[disp_cols] - profile[disp_cols].mean()) / profile[disp_cols].std()
+    fig, ax   = plt.subplots(figsize=(14, max(4, best_k)))
+    sns.heatmap(norm_p, annot=True, fmt=".2f", cmap="RdBu_r",
+                center=0, ax=ax, linewidths=0.5)
+    ax.set_title(
+        f"Hierarchical Cluster Profiles (Normalised)\n"
+        f"linkage={best_link}  k={best_k}  |  n={len(X):,} (full dataset)"
+    )
+    plt.tight_layout()
+    plt.savefig(os.path.join(FIGURES_DIR, "03_hierarchical_profiles_heatmap.png"),
+                dpi=120, bbox_inches="tight")
+    plt.close()
 
     log.info(f"  [Saved] Hierarchical figures → outputs/figures/")
 
@@ -301,8 +381,9 @@ def dbscan_analysis(X: np.ndarray, X_2d: np.ndarray, df: pd.DataFrame) -> None:
 
             results.append(dict(eps=eps, min_samples=ms, n_clusters=n_clusters,
                                 n_noise=n_noise, noise_pct=round(noise_pct, 1), silhouette=sil))
+            sil_str = f"{sil:.4f}" if not np.isnan(sil) else "N/A"
             log.info(f"  eps={eps:.1f}  min_samples={ms:3d}  "
-                     f"clusters={n_clusters:3d}  noise={noise_pct:5.1f}%  sil={sil:.4f if not np.isnan(sil) else 'N/A'}")
+                     f"clusters={n_clusters:3d}  noise={noise_pct:5.1f}%  sil={sil_str}")
 
     res_df = pd.DataFrame(results)
     res_df.to_csv(os.path.join(RESULTS_DIR, "dbscan_scores.csv"), index=False)
