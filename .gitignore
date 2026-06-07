@@ -56,3 +56,5 @@ logs/*.log
 # Misc
 *.bak
 *.tmp
+
+node_modules/
